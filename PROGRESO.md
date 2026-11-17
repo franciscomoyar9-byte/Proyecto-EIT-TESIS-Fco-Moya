@@ -37,5 +37,8 @@
 ## Sesión 2026-11-16 – Espacio de trabajo
 - El título de la ventana de VS Code ahora es "Tarea proyecto de tesis". Se configura con `window.title` en `C:\Users\56940\Downloads\proyecto 10 nov\.vscode\settings.json`.
 - Sigue sin estar instalado git, así que no hay control de versiones: el respaldo de todo el trabajo son los archivos en disco.
-- Próximo: lo mismo que al cierre de la Fase 5.
+- Se instalaron Git 2.56 y GitHub CLI 2.104. El repositorio público quedó en https://github.com/franciscomoyar9-byte/Proyecto-EIT-TESIS-Fco-Moya (rama `main`, 44 archivos).
+- Los commits se firman con el correo noreply de GitHub, configurado en el `git config` local del repositorio, para no exponer el correo personal.
+- Para subir cambios: `git add -A; git commit -m "..."; git push`.
+- Próximo: completar los `[COMPLETAR]` y `[VERIFICAR]` del borrador.
 
