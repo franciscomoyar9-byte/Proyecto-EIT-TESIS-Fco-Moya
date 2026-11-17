@@ -1,0 +1,104 @@
+{
+  "n_ciclos_validos": 297,
+  "objetivo": "vol_insp_flujo",
+  "validacion": "KFold temporal por bloques contiguos, k=5, sin barajar",
+  "r_pearson_dZ_vs_volumen_sin_modelo": 0.2772464907058087,
+  "volumen_referencia_L": {
+    "media": 1.2431108786497322,
+    "DE": 0.31975975931785927,
+    "min": 0.0369686293650507,
+    "max": 2.70823268848568
+  },
+  "metricas_oof": {
+    "Lineal (ΔZ)": {
+      "R2": -0.2057,
+      "r_pearson": -0.1849,
+      "RMSE_L": 0.3505,
+      "MAE_L": 0.2912,
+      "error_rel_pct": 23.424,
+      "BA_sesgo_L": 0.0078,
+      "BA_LoA_inf_L": -0.6802,
+      "BA_LoA_sup_L": 0.6958
+    },
+    "Ridge (multivariable)": {
+      "R2": 0.8405,
+      "r_pearson": 0.9173,
+      "RMSE_L": 0.1275,
+      "MAE_L": 0.0919,
+      "error_rel_pct": 7.3948,
+      "BA_sesgo_L": -0.0079,
+      "BA_LoA_inf_L": -0.2577,
+      "BA_LoA_sup_L": 0.2419
+    },
+    "Random Forest (multivariable)": {
+      "R2": 0.6271,
+      "r_pearson": 0.7945,
+      "RMSE_L": 0.1949,
+      "MAE_L": 0.1305,
+      "error_rel_pct": 10.4988,
+      "BA_sesgo_L": -0.0179,
+      "BA_LoA_inf_L": -0.399,
+      "BA_LoA_sup_L": 0.3632
+    },
+    "Ridge (solo EIT)": {
+      "R2": 0.3131,
+      "r_pearson": 0.5634,
+      "RMSE_L": 0.2646,
+      "MAE_L": 0.1911,
+      "error_rel_pct": 15.3753,
+      "BA_sesgo_L": -0.0057,
+      "BA_LoA_inf_L": -0.525,
+      "BA_LoA_sup_L": 0.5137
+    }
+  },
+  "R2_por_bloque": {
+    "Lineal (ΔZ)": [
+      -9.375,
+      -2.6194,
+      0.0706,
+      -2.9065,
+      -0.4781
+    ],
+    "Ridge (multivariable)": [
+      -0.2084,
+      -0.066,
+      0.6044,
+      0.8458,
+      0.7745
+    ],
+    "Random Forest (multivariable)": [
+      -2.2487,
+      0.4265,
+      0.4251,
+      0.6462,
+      0.355
+    ],
+    "Ridge (solo EIT)": [
+      -6.3229,
+      -0.1899,
+      -0.152,
+      -0.1441,
+      0.1547
+    ]
+  },
+  "metricas_descriptivas_pipeline": {
+    "Sujeto": "03",
+    "Media": 4777.49075889675,
+    "Desviacion_estandar": 2350.6666771373752,
+    "Minimo": -25.2048435275589,
+    "Maximo": 18440.7287371872,
+    "Amplitud_global": 18465.93358071476,
+    "Pendiente": 2.8495701791606924,
+    "R2": 0.1251692580007596,
+    "n_ciclos": 301,
+    "n_validos": 297,
+    "FR_resp_min": 18.292682926828785,
+    "duracion_mediana": 3.2800000000000864,
+    "duracion_std": 0.5331126010600797,
+    "amplitud_mediana": 5847.889489147414,
+    "amplitud_IQR": 1038.5026303928116,
+    "Ti_eit_mediano": 1.339999999999918,
+    "Ti_flujo_mediano": 1.5,
+    "auc_rel_mediano": 8719.741965553367
+  }
+}

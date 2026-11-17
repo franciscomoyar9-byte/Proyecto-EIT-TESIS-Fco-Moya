@@ -1,0 +1,47 @@
+{
+  "RUTA_DATOS": "data",
+  "PATRON": "ProcessedData_Subject*.csv",
+  "CARPETA_SALIDA": "resultados",
+  "MOSTRAR_FIGURAS": true,
+  "FC_COMPARAR": [
+    20,
+    5,
+    2,
+    1
+  ],
+  "FC_ANALISIS": 5.0,
+  "FC_FLUJO": 10.0,
+  "ORDEN_FILTRO": 4,
+  "DIST_MIN_S": 1.5,
+  "PROM_REL": 0.15,
+  "VENTANA_EJEMPLO": [
+    100,
+    110
+  ],
+  "TOL_ONSET_S": 1.0,
+  "DUR_MIN_S": 1.5,
+  "DUR_MAX_S": 10.0,
+  "RATIO_DUR": [
+    0.5,
+    2.0
+  ],
+  "RATIO_AMP": [
+    0.5,
+    2.0
+  ],
+  "MIN_TI_FLUJO_S": 0.3,
+  "VENTANA_LOCAL": 15,
+  "EXCLUIR_MULTIPLES_PICOS": true,
+  "UMBRAL_CAIDA_PRES": 2.0,
+  "CONDICIONES": [],
+  "COL": {
+    "t_flujo": "Time [s]",
+    "presion": "Pressure [cmH2O]",
+    "flujo": "Flow [L/s]",
+    "vtidal": "V_tidal [L]",
+    "idx_flujo": "Inspiratory Indicies",
+    "t_eit": "Time (Aeration Data)_[s]",
+    "eit": "Global Aeration",
+    "idx_eit": "Inspiratory Indicies (Aeration Data)"
+  }
+}

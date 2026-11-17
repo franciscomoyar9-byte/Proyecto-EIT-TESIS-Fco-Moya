@@ -1,0 +1,7 @@
+# Probado con Python 3.14 y estas versiones (2026-11-10)
+numpy>=2.0        # probado 2.5.3
+pandas>=2.2       # probado 3.0.6
+scipy>=1.11       # probado 1.18.1
+matplotlib>=3.8   # probado 3.11.2
+scikit-learn>=1.4 # probado 1.9.1
+reportlab>=4.0    # probado 5.1.0

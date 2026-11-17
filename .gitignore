@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.ipynb_checkpoints/
+
+# Sistema / editor
+.DS_Store
+Thumbs.db
+desktop.ini
+.vscode/*.log
+
+# Claude Code: configuración local (las skills sí se suben)
+.claude/settings.local.json
+
+# PDFs de papers con derechos de autor (solo uso local)
+bibliografia/papers/*
+!bibliografia/papers/.gitkeep

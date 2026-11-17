@@ -1,0 +1,13 @@
+{
+    "python-envs.defaultEnvManager": "ms-python.python:system",
+    "files.exclude": {
+        "**/__pycache__": true
+    },
+    "files.associations": {
+        "*.bib": "bibtex"
+    },
+    "files.encoding": "utf8",
+    "editor.rulers": [120],
+    "explorer.sortOrder": "type",
+    "python.terminal.executeInFileDir": false
+}

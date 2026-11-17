@@ -1,0 +1,1214 @@
+
+import json 
+
+import re 
+
+import sys 
+
+from pathlib import Path 
+
+  
+
+import numpy as np 
+
+import pandas as pd 
+
+import matplotlib.pyplot as plt 
+
+from scipy.signal import butter, sosfiltfilt, find_peaks, welch, correlate, correlation_lags 
+
+from scipy.stats import linregress 
+
+  
+
+trapz = getattr(np, "trapezoid", None) or np.trapz # compatible con NumPy 1.x y 2.x 
+
+  
+
+# ===================================================================== 
+
+# CONFIGURACIÓN (todo lo que puedas querer cambiar está aquí) 
+
+# ===================================================================== 
+
+RUTA_DATOS = Path(r"C:\Users\56940\EIT_TESISUI") # carpeta con los CSV (o un .csv) 
+
+PATRON = "ProcessedData_Subject*.csv" 
+
+CARPETA_SALIDA = "resultados" 
+
+MOSTRAR_FIGURAS = True # True: plt.show() además de guardar; False: solo guarda 
+
+  
+
+COL = { 
+
+"t_flujo": "Time [s]", 
+
+"presion": "Pressure [cmH2O]", 
+
+"flujo": "Flow [L/s]", 
+
+"vtidal": "V_tidal [L]", 
+
+"idx_flujo": "Inspiratory Indicies", 
+
+"t_eit": "Time (Aeration Data)_[s]", 
+
+"eit": "Global Aeration", 
+
+"idx_eit": "Inspiratory Indicies (Aeration Data)", 
+
+} 
+
+  
+
+# Paso 1: filtrado 
+
+FC_COMPARAR = [20, 5, 2, 1] # cortes (Hz) a comparar (20 Hz = lo pedido por el tutor) 
+
+FC_ANALISIS = 5.0 # corte con el que se detectan extremos y se calculan métricas 
+
+FC_FLUJO = 10.0 # corte para el flujo (solo para cruces por cero) 
+
+ORDEN_FILTRO = 4 
+
+  
+
+# Paso 2: detección de extremos 
+
+DIST_MIN_S = 1.5 # separación mínima entre extremos (s) 
+
+PROM_REL = 0.15 # prominencia mínima = PROM_REL * (percentil 95 - percentil 5) 
+
+VENTANA_EJEMPLO = (100, 110) # segmento (s) para los gráficos de zoom 
+
+  
+
+# Paso 3-4: ciclos y criterios de exclusión 
+
+TOL_ONSET_S = 1.0 # tolerancia para asociar un mínimo EIT con un inicio inspiratorio del ventilador 
+
+DUR_MIN_S, DUR_MAX_S = 1.5, 10.0 
+
+RATIO_DUR = (0.5, 2.0) # duración / mediana local permitida 
+
+RATIO_AMP = (0.5, 2.0) # amplitud / mediana local permitida 
+
+MIN_TI_FLUJO_S = 0.3 # tiempo inspiratorio mínimo (s) para buscar el fin de la inspiración en el flujo 
+
+VENTANA_LOCAL = 15 # nº de ciclos vecinos para la mediana local 
+
+EXCLUIR_MULTIPLES_PICOS = True 
+
+  
+
+# Paso 7: pasivo vs activo (heurística con la presión de vía aérea; no hay PES en estos datos) 
+
+# OJO: en el sujeto 03 la caída de presión no es bimodal (mediana ~1.2 cmH2O), así que este umbral es 
+
+# provisional. Calíbralo con la PES o con las condiciones experimentales; la columna continua 
+
+# "caida_presion" queda siempre guardada en la matriz de ciclos. 
+
+UMBRAL_CAIDA_PRES = 2.0 # cmH2O: caída de presión antes del inicio inspiratorio => esfuerzo probable 
+
+  
+
+# Condiciones ventilatorias por tiempo: [(t_inicio_s, t_fin_s, "nombre"), ...] 
+
+# Ejemplo: [(0, 300, "PEEP 5"), (300, 600, "PEEP 10")]. Si queda vacío => "sin_asignar". 
+
+CONDICIONES = [] 
+
+  
+
+  
+
+# ===================================================================== 
+
+# UTILIDADES 
+
+# ===================================================================== 
+
+def seccion(txt): 
+
+print("\n" + "=" * 70 + f"\n{txt}\n" + "=" * 70) 
+
+  
+
+  
+
+def guardar(fig, carpeta, nombre): 
+
+fig.savefig(carpeta / nombre, dpi=150, bbox_inches="tight") 
+
+if MOSTRAR_FIGURAS: 
+
+plt.show() 
+
+plt.close(fig) 
+
+  
+
+  
+
+def estimar_fs(t): 
+
+dt = np.diff(t) 
+
+med = np.median(dt) 
+
+ok = bool(np.all(dt > 0) and np.max(np.abs(dt - med)) < 0.5 * med) 
+
+return 1.0 / med, ok 
+
+  
+
+  
+
+def pasabajos(x, fc, fs, orden=ORDEN_FILTRO): 
+
+if fc >= fs / 2: 
+
+raise ValueError(f"Corte {fc} Hz >= Nyquist ({fs/2} Hz)") 
+
+sos = butter(orden, fc, btype="lowpass", fs=fs, output="sos") 
+
+return sosfiltfilt(sos, x) # fase cero: no desplaza los tiempos de los extremos 
+
+  
+
+  
+
+def mediana_local(serie, ventana=VENTANA_LOCAL): 
+
+return serie.rolling(ventana, center=True, min_periods=3).median() 
+
+  
+
+  
+
+# ===================================================================== 
+
+# CARGA 
+
+# ===================================================================== 
+
+def cargar_sujeto(ruta): 
+
+datos = pd.read_csv(ruta) 
+
+faltan = [c for c in COL.values() if c not in datos.columns] 
+
+if faltan: 
+
+raise KeyError(f"Faltan columnas en {Path(ruta).name}: {faltan}") 
+
+  
+
+# La EIT (50 Hz) comparte tabla con el flujo (100 Hz): las filas sin EIT tienen tiempo 0. 
+
+m_eit = datos[COL["t_eit"]] > 0 
+
+pos = np.where(m_eit)[0] 
+
+if not np.all(np.diff(pos) == 1): 
+
+print("AVISO: las filas EIT válidas no son contiguas; revisar el archivo.") 
+
+eit = pd.DataFrame({"t": datos.loc[m_eit, COL["t_eit"]].to_numpy(), 
+
+"x": datos.loc[m_eit, COL["eit"]].to_numpy()}) 
+
+  
+
+flujo = pd.DataFrame({"t": datos[COL["t_flujo"]].to_numpy(), 
+
+"presion": datos[COL["presion"]].to_numpy(), 
+
+"flujo": datos[COL["flujo"]].to_numpy(), 
+
+"vtidal": datos[COL["vtidal"]].to_numpy()}) 
+
+  
+
+# Índices inspiratorios del ventilador/flujo: posiciones (filas) de inicio de inspiración 
+
+idx = datos[COL["idx_flujo"]].to_numpy() 
+
+idx = idx[(idx > 0) & (idx < len(flujo))].astype(int) 
+
+t_onset = flujo["t"].to_numpy()[idx] 
+
+return datos, flujo, eit, t_onset 
+
+  
+
+  
+
+# ===================================================================== 
+
+# PASO 1: FILTRADO 
+
+# ===================================================================== 
+
+def detectar_extremos(x, fs): 
+
+"""Máximos y mínimos. Los mínimos se buscan invirtiendo la señal (-x).""" 
+
+rango = np.percentile(x, 95) - np.percentile(x, 5) 
+
+kw = dict(distance=int(DIST_MIN_S * fs), prominence=PROM_REL * rango) 
+
+imax, _ = find_peaks(x, **kw) 
+
+imin, _ = find_peaks(-x, **kw) 
+
+return imin, imax 
+
+  
+
+  
+
+def amplitudes_por_ciclo(x, imin): 
+
+return np.array([x[a:b + 1].max() - x[a] for a, b in zip(imin[:-1], imin[1:])]) 
+
+  
+
+  
+
+def comparar_filtros(sujeto, te, x, fs, carpeta): 
+
+seccion(f"PASO 1 - Filtrado Butterworth pasa-bajos (orden {ORDEN_FILTRO}, fs={fs:.1f} Hz)") 
+
+# Espectro: dónde está la respiración y dónde el componente cardíaco 
+
+f, P = welch(x - x.mean(), fs=fs, nperseg=min(4096, len(x))) 
+
+bresp = (f > 0.1) & (f < 0.8) 
+
+bcard = (f >= 0.8) & (f < 3.0) 
+
+f_resp, f_card = f[bresp][np.argmax(P[bresp])], f[bcard][np.argmax(P[bcard])] 
+
+print(f"Pico respiratorio: {f_resp:.2f} Hz ({60*f_resp:.1f} resp/min) | " 
+
+f"pico en 0.8-3 Hz (posible cardíaco): {f_card:.2f} Hz") 
+
+if max(FC_COMPARAR) >= 0.8 * fs / 2: 
+
+print(f"AVISO: un corte de {max(FC_COMPARAR)} Hz está cerca de Nyquist ({fs/2:.0f} Hz); " 
+
+"filtra casi nada. Úsalo solo como referencia.") 
+
+  
+
+ref = max(FC_COMPARAR) 
+
+senales, filas, minimos = {}, [], {} 
+
+for fc in FC_COMPARAR: 
+
+xf = pasabajos(x, fc, fs) 
+
+senales[fc] = xf 
+
+imin, imax = detectar_extremos(xf, fs) 
+
+minimos[fc] = imin 
+
+amp = amplitudes_por_ciclo(xf, imin) 
+
+filas.append({"corte_Hz": fc, 
+
+"RMS_diferencia": np.sqrt(np.mean((x - xf) ** 2)), 
+
+"n_minimos": len(imin), "n_maximos": len(imax), 
+
+"amplitud_mediana": np.median(amp)}) 
+
+tab = pd.DataFrame(filas) 
+
+# Efecto sobre la morfología, relativo al corte más alto (referencia) 
+
+amp_ref = tab.loc[tab.corte_Hz == ref, "amplitud_mediana"].iloc[0] 
+
+tab["cambio_amplitud_%"] = 100 * (tab["amplitud_mediana"] - amp_ref) / amp_ref 
+
+desp = [] 
+
+for fc in FC_COMPARAR: 
+
+tm, tr = te[minimos[fc]], te[minimos[ref]] 
+
+desp.append(1000 * np.median([np.min(np.abs(tr - t0)) for t0 in tm]) if len(tm) else np.nan) 
+
+tab["desplaz_minimos_ms"] = desp 
+
+print(tab.round(2).to_string(index=False)) 
+
+print(f"(referencia = {ref} Hz; el desplazamiento de mínimos y el cambio de amplitud miden si el filtro altera los ciclos)") 
+
+  
+
+# Figuras: zoom de 10 s y espectro 
+
+a, b = VENTANA_EJEMPLO 
+
+m = (te >= a) & (te <= b) 
+
+fig, ax = plt.subplots(2, 1, figsize=(11, 8)) 
+
+ax[0].plot(te[m], x[m], color="gray", alpha=0.7, label="Original") 
+
+for fc in FC_COMPARAR: 
+
+ax[0].plot(te[m], senales[fc][m], label=f"{fc} Hz") 
+
+ax[0].set(xlabel="Tiempo (s)", ylabel="Aeración global", 
+
+title=f"Sujeto {sujeto}: original vs filtrada ({a}-{b} s)") 
+
+ax[0].legend(); ax[0].grid(True) 
+
+ax[1].semilogy(f, P, color="k") 
+
+for fc in FC_COMPARAR: 
+
+ax[1].axvline(fc, ls="--", lw=0.8, label=f"{fc} Hz") 
+
+ax[1].set(xlim=(0, fs / 2), xlabel="Frecuencia (Hz)", ylabel="PSD", title="Espectro de la señal EIT") 
+
+ax[1].legend(ncol=4); ax[1].grid(True) 
+
+fig.tight_layout() 
+
+guardar(fig, carpeta, f"01_filtros_sujeto{sujeto}.png") 
+
+return senales[FC_ANALISIS] if FC_ANALISIS in senales else pasabajos(x, FC_ANALISIS, fs), tab 
+
+  
+
+  
+
+# ===================================================================== 
+
+# PASO 2: EXTREMOS, ARTEFACTOS Y VALORES EXTREMOS 
+
+# ===================================================================== 
+
+def reportar_extremos(sujeto, te, x_raw, xf, imin, imax, flujo, fs_e, carpeta): 
+
+seccion("PASO 2 - Máximos y mínimos de aeración global") 
+
+print(f"Mínimos detectados: {len(imin)} | Máximos detectados: {len(imax)}") 
+
+print(f"Señal cruda: mín={x_raw.min():.1f}, máx={x_raw.max():.1f}, " 
+
+f"valores negativos={int((x_raw < 0).sum())}, NaN={int(np.isnan(x_raw).sum())}") 
+
+for nombre, idx in (("mínimos", imin), ("máximos", imax)): 
+
+v = xf[idx] 
+
+z = (v - np.median(v)) / (1.4826 * np.median(np.abs(v - np.median(v))) + 1e-12) 
+
+raros = np.where(np.abs(z) > 4)[0] 
+
+print(f"Valores extremos entre los {nombre} (|z robusto|>4): {len(raros)}") 
+
+for r in raros[:10]: 
+
+print(f" t={te[idx[r]]:.2f} s valor={v[r]:.0f} z={z[r]:.1f}") 
+
+  
+
+# Desfase EIT-flujo (derivada de la EIT ~ flujo) 
+
+tf, ff = flujo["t"].to_numpy(), flujo["flujo_f"].to_numpy() 
+
+dx = np.gradient(xf, 1 / fs_e) 
+
+a = dx - dx.mean() 
+
+b = np.interp(te, tf, ff) 
+
+b = b - b.mean() 
+
+c = correlate(a, b, mode="full", method="fft") 
+
+lags = correlation_lags(len(a), len(b)) 
+
+m = np.abs(lags) <= int(1.5 * fs_e) 
+
+lag_s = lags[m][np.argmax(c[m])] / fs_e 
+
+print(f"Desfase EIT respecto al flujo (correlación cruzada): {lag_s*1000:.0f} ms " 
+
+"(positivo = la EIT va retrasada)") 
+
+  
+
+# Figura: registro completo con extremos 
+
+fig, ax = plt.subplots(3, 1, figsize=(14, 8), sharex=True) 
+
+ax[0].plot(te, x_raw, color="gray", alpha=0.4, lw=0.6, label="cruda") 
+
+ax[0].plot(te, xf, lw=0.8, label=f"filtrada {FC_ANALISIS:g} Hz") 
+
+ax[0].plot(te[imax], xf[imax], "r.", ms=4, label="máximos") 
+
+ax[0].plot(te[imin], xf[imin], "g.", ms=4, label="mínimos") 
+
+ax[0].set_ylabel("Aeración global"); ax[0].legend(ncol=4, loc="upper right") 
+
+ax[0].set_title(f"Sujeto {sujeto}: extremos detectados en todo el registro EIT") 
+
+ax[1].plot(tf, ff, lw=0.6); ax[1].axhline(0, color="k", lw=0.5) 
+
+ax[1].set_ylabel("Flujo (L/s)") 
+
+ax[2].plot(tf, flujo["presion"], lw=0.6); ax[2].set_ylabel("Presión (cmH2O)") 
+
+ax[2].set_xlabel("Tiempo (s)") 
+
+ax[2].set_xlim(te[0], te[-1]) 
+
+for a_ in ax: 
+
+a_.grid(True) 
+
+fig.tight_layout() 
+
+guardar(fig, carpeta, f"02_extremos_registro_sujeto{sujeto}.png") 
+
+  
+
+a_, b_ = VENTANA_EJEMPLO 
+
+mm = (te >= a_) & (te <= b_) 
+
+fig, ax = plt.subplots(2, 1, figsize=(11, 6), sharex=True) 
+
+ax[0].plot(te[mm], x_raw[mm], color="gray", alpha=0.6, label="cruda") 
+
+ax[0].plot(te[mm], xf[mm], label="filtrada") 
+
+for idx, col, lab in ((imax, "r", "máximo"), (imin, "g", "mínimo")): 
+
+sel = idx[(te[idx] >= a_) & (te[idx] <= b_)] 
+
+ax[0].plot(te[sel], xf[sel], col + "o", label=lab) 
+
+ax[0].set_ylabel("Aeración global"); ax[0].legend(); ax[0].grid(True) 
+
+mf = (tf >= a_) & (tf <= b_) 
+
+ax[1].plot(tf[mf], ff[mf]); ax[1].axhline(0, color="k", lw=0.5) 
+
+ax[1].set(ylabel="Flujo (L/s)", xlabel="Tiempo (s)"); ax[1].grid(True) 
+
+fig.tight_layout() 
+
+guardar(fig, carpeta, f"02b_extremos_zoom_sujeto{sujeto}.png") 
+
+return lag_s 
+
+  
+
+  
+
+# ===================================================================== 
+
+# PASO 3, 5 y 6: CICLOS Y CARACTERÍSTICAS 
+
+# ===================================================================== 
+
+def construir_ciclos(sujeto, te, xf, imin, imax): 
+
+"""Ciclo k = [mínimo k, mínimo k+1). Inspiración = mínimo -> máximo EIT.""" 
+
+filas = [] 
+
+for k in range(len(imin) - 1): 
+
+i0, i1 = int(imin[k]), int(imin[k + 1]) 
+
+seg, tseg = xf[i0:i1 + 1], te[i0:i1 + 1] 
+
+ipk = i0 + int(np.argmax(seg)) 
+
+n_picos = int(np.sum((imax > i0) & (imax < i1))) 
+
+base = xf[i0] 
+
+grad = np.gradient(xf[i0:ipk + 1], te[i0:ipk + 1]) if ipk - i0 >= 2 else np.array([np.nan]) 
+
+filas.append({ 
+
+"sujeto": sujeto, "ciclo": k + 1, 
+
+"t_inicio": te[i0], "t_fin": te[i1], "duracion": te[i1] - te[i0], 
+
+"t_max": te[ipk], "Ti_eit": te[ipk] - te[i0], "Te_eit": te[i1] - te[ipk], 
+
+"eit_min_inicio": base, "eit_max": xf[ipk], "eit_min_fin": xf[i1], 
+
+"amplitud": xf[ipk] - base, "delta_basal": xf[i1] - base, 
+
+"auc_abs": trapz(seg, tseg), "auc_rel": trapz(seg - base, tseg), 
+
+"auc_insp_rel": trapz(xf[i0:ipk + 1] - base, te[i0:ipk + 1]), 
+
+"pend_max_insp": np.nanmax(grad), "n_picos": n_picos, 
+
+}) 
+
+df = pd.DataFrame(filas) 
+
+df["Ti_Ttot"] = df["Ti_eit"] / df["duracion"] 
+
+return df 
+
+  
+
+  
+
+def agregar_flujo_presion(df, flujo, t_onset): 
+
+"""Asocia cada ciclo con el inicio inspiratorio del ventilador y calcula variables de flujo y presión.""" 
+
+tf = flujo["t"].to_numpy() 
+
+ff = flujo["flujo_f"].to_numpy() 
+
+p = flujo["presion"].to_numpy() 
+
+fs_f, _ = estimar_fs(tf) 
+
+cols = ["t_onset_vent", "desfase_min_vs_onset", "Ti_flujo", "pico_flujo_insp", "vol_insp_flujo", 
+
+"presion_media", "presion_max", "presion_min", "caida_presion"] 
+
+out = {c: np.full(len(df), np.nan) for c in cols} 
+
+for i, r in enumerate(df.itertuples(index=False)): 
+
+a, b = np.searchsorted(tf, [r.t_inicio, r.t_fin]) 
+
+if b > a: 
+
+out["presion_media"][i], out["presion_max"][i], out["presion_min"][i] = \ 
+
+p[a:b].mean(), p[a:b].max(), p[a:b].min() 
+
+if len(t_onset) == 0: 
+
+continue 
+
+j = int(np.argmin(np.abs(t_onset - r.t_inicio))) 
+
+if abs(t_onset[j] - r.t_inicio) > TOL_ONSET_S: 
+
+continue 
+
+t_on = t_onset[j] 
+
+out["t_onset_vent"][i] = t_on 
+
+out["desfase_min_vs_onset"][i] = r.t_inicio - t_on 
+
+i_on = int(np.searchsorted(tf, t_on)) 
+
+i_fin = int(np.searchsorted(tf, r.t_fin)) 
+
+# fin de la inspiración = primer cruce de flujo a <=0 pasados MIN_TI_FLUJO_S del inicio. 
+
+# Si el flujo ya es <=0 en ese punto, el inicio del ventilador no es fiable => NaN. 
+
+i_s = i_on + int(MIN_TI_FLUJO_S * fs_f) 
+
+cruce = np.where(ff[i_s:i_fin] <= 0)[0] if (i_s < len(ff) and ff[i_s] > 0) else [] 
+
+if len(cruce): 
+
+i_cr = i_s + int(cruce[0]) 
+
+out["Ti_flujo"][i] = tf[i_cr] - t_on 
+
+out["pico_flujo_insp"][i] = ff[i_on:i_cr + 1].max() 
+
+out["vol_insp_flujo"][i] = trapz(np.clip(ff[i_on:i_cr + 1], 0, None), tf[i_on:i_cr + 1]) 
+
+# caída de presión justo antes/durante el inicio (esfuerzo inspiratorio) 
+
+pre = p[np.searchsorted(tf, t_on - 0.6):np.searchsorted(tf, t_on - 0.4)] 
+
+ven = p[np.searchsorted(tf, t_on - 0.5):np.searchsorted(tf, t_on + 0.1)] 
+
+if len(pre) and len(ven): 
+
+out["caida_presion"][i] = np.median(pre) - ven.min() 
+
+for c in cols: 
+
+df[c] = out[c] 
+
+# 1 = esfuerzo probable (activo), 0 = pasivo, NaN = no evaluable 
+
+df["esfuerzo_probable"] = np.where(df["caida_presion"].isna(), np.nan, 
+
+(df["caida_presion"] > UMBRAL_CAIDA_PRES).astype(float)) 
+
+return df 
+
+  
+
+  
+
+def asignar_condicion(df): 
+
+df["condicion"] = "sin_asignar" 
+
+for t0, t1, nombre in CONDICIONES: 
+
+df.loc[(df.t_inicio >= t0) & (df.t_inicio < t1), "condicion"] = nombre 
+
+return df 
+
+  
+
+  
+
+# ===================================================================== 
+
+# PASO 4: CRITERIOS DE EXCLUSIÓN 
+
+# ===================================================================== 
+
+def marcar_validez(df, hay_onsets): 
+
+med_dur, med_amp = mediana_local(df["duracion"]), mediana_local(df["amplitud"]) 
+
+df["motivo_exclusion"] = "" 
+
+  
+
+def marca(mask, texto): 
+
+df.loc[mask, "motivo_exclusion"] += texto + ";" 
+
+  
+
+marca((df.duracion < DUR_MIN_S) | (df.duracion > DUR_MAX_S), "duracion_fuera_rango") 
+
+r = df.duracion / med_dur 
+
+marca((r < RATIO_DUR[0]) | (r > RATIO_DUR[1]), "duracion_atipica_local") 
+
+r = df.amplitud / med_amp 
+
+marca((df.amplitud <= 0) | (r < RATIO_AMP[0]) | (r > RATIO_AMP[1]), "amplitud_atipica_local") 
+
+if EXCLUIR_MULTIPLES_PICOS: 
+
+marca(df.n_picos != 1, "multiples_picos") 
+
+if hay_onsets: 
+
+marca(df.t_onset_vent.isna(), "sin_inicio_ventilador") 
+
+marca(df.Ti_flujo.isna() & df.t_onset_vent.notna(), "sin_fin_inspiracion_flujo") 
+
+marca(df[["duracion", "amplitud", "auc_rel"]].isna().any(axis=1), "datos_faltantes") 
+
+df["valido"] = df["motivo_exclusion"] == "" 
+
+return df 
+
+  
+
+  
+
+def validar_segmentacion(sujeto, df, te, x_raw, xf, flujo, t_onset, lag_s, carpeta): 
+
+seccion("PASO 4 - Validación de la segmentación") 
+
+n, nv = len(df), int(df.valido.sum()) 
+
+print(f"Ciclos: {n} | válidos: {nv} | excluidos: {n - nv}") 
+
+if n - nv: 
+
+motivos = df.loc[~df.valido, "motivo_exclusion"].str.rstrip(";").str.split(";").explode() 
+
+print("Motivos de exclusión (un ciclo puede tener varios):") 
+
+print(motivos.value_counts().to_string()) 
+
+dur = df.loc[df.valido, "duracion"] 
+
+print(f"Duración de ciclos válidos: mediana={dur.median():.2f} s, " 
+
+f"FR≈{60/dur.median():.1f} resp/min, rango={dur.min():.2f}-{dur.max():.2f} s") 
+
+  
+
+# Concordancia con el inicio inspiratorio del ventilador (en ambos sentidos) 
+
+if len(t_onset): 
+
+en_rango = t_onset[(t_onset >= te[0]) & (t_onset <= te[-1])] 
+
+usados = df.t_onset_vent.dropna().unique() 
+
+print(f"Inicios inspiratorios del ventilador dentro del registro EIT: {len(en_rango)} | " 
+
+f"asociados a un ciclo: {len(usados)} | sin ciclo: {len(en_rango) - len(usados)}") 
+
+sin_ciclo = [round(float(t), 2) for t in en_rango if t not in usados] 
+
+if sin_ciclo: 
+
+print(f" tiempos de inicios sin ciclo (s): {sin_ciclo} (los bordes del registro son normales)") 
+
+dup = int(df.t_onset_vent.dropna().duplicated().sum()) 
+
+if dup: 
+
+print(f"AVISO: {dup} inicios del ventilador asociados a más de un ciclo (posible ciclo partido).") 
+
+d = df.desfase_min_vs_onset.dropna() 
+
+print(f"Mínimo EIT - inicio ventilador: mediana={d.median()*1000:.0f} ms, " 
+
+f"p5-p95=({d.quantile(.05)*1000:.0f}, {d.quantile(.95)*1000:.0f}) ms " 
+
+f"(correlación cruzada: {lag_s*1000:.0f} ms)") 
+
+ti = df.loc[df.valido, "Ti_flujo"].dropna() 
+
+if len(ti): 
+
+print(f"Ti por flujo: mediana={ti.median():.2f} s | Ti por EIT (mín->máx): " 
+
+f"mediana={df.loc[df.valido, 'Ti_eit'].median():.2f} s") 
+
+  
+
+# Figuras de ciclos individuales (válidos equiespaciados y excluidos) 
+
+def figura_ciclos(idx_ciclos, titulo, nombre): 
+
+k = len(idx_ciclos) 
+
+if k == 0: 
+
+return 
+
+fig, ax = plt.subplots(3, k, figsize=(3.2 * k, 7), squeeze=False) 
+
+tf, ff, p = flujo["t"].to_numpy(), flujo["flujo_f"].to_numpy(), flujo["presion"].to_numpy() 
+
+for j, i in enumerate(idx_ciclos): 
+
+r = df.iloc[i] 
+
+t0, t1 = r.t_inicio - 1.0, r.t_fin + 1.0 
+
+me, mf = (te >= t0) & (te <= t1), (tf >= t0) & (tf <= t1) 
+
+ax[0, j].plot(te[me], x_raw[me], color="gray", alpha=0.5) 
+
+ax[0, j].plot(te[me], xf[me]) 
+
+ax[0, j].axvspan(r.t_inicio, r.t_fin, color="C2" if r.valido else "C3", alpha=0.12) 
+
+ax[0, j].plot([r.t_inicio, r.t_fin], [r.eit_min_inicio, r.eit_min_fin], "go") 
+
+ax[0, j].plot(r.t_max, r.eit_max, "ro") 
+
+ax[0, j].set_title(f"ciclo {int(r.ciclo)}" + ("" if r.valido else "\n" + r.motivo_exclusion[:28]), fontsize=8) 
+
+ax[1, j].plot(tf[mf], ff[mf]); ax[1, j].axhline(0, color="k", lw=0.5) 
+
+ax[2, j].plot(tf[mf], p[mf]) 
+
+for fila in (1, 2): 
+
+ax[fila, j].axvspan(r.t_inicio, r.t_fin, color="C2" if r.valido else "C3", alpha=0.12) 
+
+if not np.isnan(r.t_onset_vent): 
+
+for fila in range(3): 
+
+ax[fila, j].axvline(r.t_onset_vent, color="m", ls="--", lw=0.8) 
+
+for fila in range(3): 
+
+ax[fila, j].set_xlim(t0, t1); ax[fila, j].grid(True) 
+
+ax[0, 0].set_ylabel("Aeración"); ax[1, 0].set_ylabel("Flujo (L/s)"); ax[2, 0].set_ylabel("Presión") 
+
+fig.suptitle(f"Sujeto {sujeto}: {titulo} (línea magenta = inicio inspiratorio del ventilador)", y=1.0) 
+
+fig.tight_layout() 
+
+guardar(fig, carpeta, nombre) 
+
+  
+
+validos = np.where(df.valido)[0] 
+
+if len(validos): 
+
+figura_ciclos(list(validos[np.linspace(0, len(validos) - 1, min(6, len(validos))).astype(int)]), 
+
+"ciclos válidos de ejemplo", f"04_ciclos_validos_sujeto{sujeto}.png") 
+
+figura_ciclos(list(np.where(~df.valido)[0][:6]), "ciclos excluidos", f"04b_ciclos_excluidos_sujeto{sujeto}.png") 
+
+  
+
+  
+
+# ===================================================================== 
+
+# PASO 6b y 7: NIVEL BASAL, COMPARACIÓN Y SUPERPOSICIÓN 
+
+# ===================================================================== 
+
+def analizar_basal(sujeto, df, carpeta): 
+
+seccion("PASO 6 - Efecto del nivel basal y de los valores extremos") 
+
+v = df[df.valido] 
+
+if len(v) < 5: 
+
+print("Muy pocos ciclos válidos para analizar."); return 
+
+ajuste = linregress(v.t_inicio, v.eit_min_inicio) 
+
+print(f"Deriva del nivel basal (mínimos): {ajuste.slope:.2f} u/s (R²={ajuste.rvalue**2:.2f})") 
+
+print(f"corr(basal, amplitud) = {v.eit_min_inicio.corr(v.amplitud):.2f}") 
+
+print(f"corr(basal, AUC abs.) = {v.eit_min_inicio.corr(v.auc_abs):.2f} " 
+
+f"<- si es alta, el AUC absoluto depende del nivel basal") 
+
+print(f"corr(basal, AUC rel.) = {v.eit_min_inicio.corr(v.auc_rel):.2f}") 
+
+print(f"corr(AUC rel., amplitud) = {v.auc_rel.corr(v.amplitud):.2f}") 
+
+q = v[["amplitud", "auc_rel", "duracion"]].quantile([0.01, 0.5, 0.99]) 
+
+print("Percentiles 1/50/99 (sensibilidad a extremos):"); print(q.round(1).to_string()) 
+
+  
+
+fig, ax = plt.subplots(2, 1, figsize=(12, 6), sharex=True) 
+
+ax[0].plot(v.t_inicio, v.eit_min_inicio, ".", label="mínimo (basal) por ciclo") 
+
+ax[0].plot(v.t_inicio, v.eit_max, ".", label="máximo por ciclo") 
+
+ax[0].plot(v.t_inicio, v.eit_min_inicio.rolling(10, center=True, min_periods=3).median(), "k-", lw=1) 
+
+ax[0].set_ylabel("Aeración global"); ax[0].legend(); ax[0].grid(True) 
+
+ax[0].set_title(f"Sujeto {sujeto}: nivel basal y amplitud a lo largo del registro") 
+
+ax[1].plot(v.t_inicio, v.amplitud, ".", label="amplitud") 
+
+ax[1].plot(v.t_inicio, v.auc_rel / v.duracion, ".", label="AUC rel./duración") 
+
+ax[1].set(xlabel="Tiempo (s)", ylabel="Amplitud"); ax[1].legend(); ax[1].grid(True) 
+
+fig.tight_layout() 
+
+guardar(fig, carpeta, f"06_basal_sujeto{sujeto}.png") 
+
+  
+
+  
+
+def comparar_ciclos(sujeto, df, te, xf, carpeta): 
+
+seccion("PASO 7 - Comparación de ciclos") 
+
+v = df[df.valido].copy() 
+
+cols = ["duracion", "Ti_eit", "Ti_flujo", "amplitud", "auc_rel", "pend_max_insp", "presion_max", "caida_presion"] 
+
+print("Medianas por condición y esfuerzo probable (1 = caída de presión previa al inicio, 0 = pasivo):") 
+
+print(v.groupby(["condicion", "esfuerzo_probable"], dropna=False)[cols].median().round(2).to_string()) 
+
+print(f"Ciclos con esfuerzo probable: {int((v.esfuerzo_probable == 1).sum())} de {len(v)}") 
+
+print("NOTA: sin presión esofágica (PES) esta clasificación es solo orientativa; " 
+
+"contrástala con las condiciones experimentales.") 
+
+  
+
+exc = df[~df.valido] 
+
+if len(exc): 
+
+print("\nCiclos excluidos (revísalos visualmente: ¿artefacto o fisiología?):") 
+
+print(exc[["ciclo", "t_inicio", "duracion", "amplitud", "motivo_exclusion"]].round(2).head(25).to_string(index=False)) 
+
+  
+
+# Superposición: alineados en el mínimo (tiempo absoluto) y normalizados (tiempo y amplitud) 
+
+fig, ax = plt.subplots(1, 3, figsize=(16, 5)) 
+
+grid = np.linspace(0, 1, 200) 
+
+curvas = [] 
+
+for r in v.itertuples(): 
+
+m = (te >= r.t_inicio) & (te <= r.t_fin) 
+
+tt, yy = te[m] - r.t_inicio, xf[m] - r.eit_min_inicio 
+
+col = "tab:red" if r.esfuerzo_probable == 1 else "tab:blue" 
+
+ax[0].plot(tt, yy, color=col, alpha=0.12, lw=0.8) 
+
+if r.amplitud > 0: 
+
+yn = yy / r.amplitud 
+
+ax[1].plot(tt / r.duracion, yn, color=col, alpha=0.12, lw=0.8) 
+
+curvas.append(np.interp(grid, tt / r.duracion, yn)) 
+
+if curvas: 
+
+C = np.array(curvas) 
+
+ax[2].fill_between(grid, np.percentile(C, 25, axis=0), np.percentile(C, 75, axis=0), alpha=0.3) 
+
+ax[2].plot(grid, np.median(C, axis=0), "k", lw=2) 
+
+ax[0].set(xlabel="Tiempo desde el mínimo (s)", ylabel="Aeración - basal", title="Ciclos superpuestos") 
+
+ax[1].set(xlabel="Fracción del ciclo", ylabel="Amplitud normalizada", title="Normalizados (rojo = esfuerzo probable)") 
+
+ax[2].set(xlabel="Fracción del ciclo", title="Mediana y rango intercuartílico") 
+
+for a in ax: 
+
+a.grid(True) 
+
+fig.suptitle(f"Sujeto {sujeto}: morfología de los ciclos válidos") 
+
+fig.tight_layout() 
+
+guardar(fig, carpeta, f"07_superposicion_sujeto{sujeto}.png") 
+
+  
+
+  
+
+# ===================================================================== 
+
+# RESUMEN POR SUJETO 
+
+# ===================================================================== 
+
+def resumen_sujeto(sujeto, te, x, df): 
+
+aj = linregress(te, x) 
+
+v = df[df.valido] 
+
+return pd.DataFrame([{ 
+
+"Sujeto": sujeto, 
+
+"Media": x.mean(), "Desviacion_estandar": x.std(), "Minimo": x.min(), "Maximo": x.max(), 
+
+"Amplitud_global": x.max() - x.min(), "Pendiente": aj.slope, "R2": aj.rvalue ** 2, 
+
+"n_ciclos": len(df), "n_validos": len(v), 
+
+"FR_resp_min": 60 / v.duracion.median() if len(v) else np.nan, 
+
+"duracion_mediana": v.duracion.median(), "duracion_std": v.duracion.std(), 
+
+"amplitud_mediana": v.amplitud.median(), 
+
+"amplitud_IQR": v.amplitud.quantile(.75) - v.amplitud.quantile(.25), 
+
+"Ti_eit_mediano": v.Ti_eit.median(), "Ti_flujo_mediano": v.Ti_flujo.median(), 
+
+"auc_rel_mediano": v.auc_rel.median(), 
+
+}]) 
+
+  
+
+  
+
+# ===================================================================== 
+
+# PIPELINE POR SUJETO 
+
+# ===================================================================== 
+
+def procesar_sujeto(ruta, salida): 
+
+m = re.search(r"Subject(\d+)", Path(ruta).name, re.I) 
+
+sujeto = m.group(1) if m else Path(ruta).stem 
+
+carpeta = salida / f"sujeto{sujeto}" 
+
+carpeta.mkdir(parents=True, exist_ok=True) 
+
+seccion(f"SUJETO {sujeto} ({Path(ruta).name})") 
+
+  
+
+datos, flujo, eit, t_onset = cargar_sujeto(ruta) 
+
+te, x = eit["t"].to_numpy(), eit["x"].to_numpy() 
+
+fs_e, ok_e = estimar_fs(te) 
+
+fs_f, ok_f = estimar_fs(flujo["t"].to_numpy()) 
+
+print(f"Filas totales: {len(datos)} | filas EIT válidas: {len(eit)} " 
+
+f"({te[0]:.2f}-{te[-1]:.2f} s) | fs EIT={fs_e:.2f} Hz (regular: {ok_e}) | " 
+
+f"fs flujo={fs_f:.2f} Hz (regular: {ok_f})") 
+
+print(f"Flujo disponible hasta {flujo['t'].iloc[-1]:.1f} s; EIT hasta {te[-1]:.1f} s " 
+
+"(solo se segmentan ciclos dentro del registro EIT)") 
+
+print(f"Inicios inspiratorios del ventilador/flujo: {len(t_onset)}") 
+
+if not ok_e: 
+
+print("AVISO: muestreo EIT irregular; revisar antes de filtrar.") 
+
+  
+
+flujo["flujo_f"] = pasabajos(flujo["flujo"].to_numpy(), FC_FLUJO, fs_f) 
+
+  
+
+_, tabla_filtros = comparar_filtros(sujeto, te, x, fs_e, carpeta) 
+
+xf = pasabajos(x, FC_ANALISIS, fs_e) 
+
+tabla_filtros.to_csv(carpeta / f"comparacion_filtros_sujeto{sujeto}.csv", index=False) 
+
+  
+
+imin, imax = detectar_extremos(xf, fs_e) 
+
+lag_s = reportar_extremos(sujeto, te, x, xf, imin, imax, flujo, fs_e, carpeta) 
+
+  
+
+df = construir_ciclos(sujeto, te, xf, imin, imax) 
+
+df = agregar_flujo_presion(df, flujo, t_onset) 
+
+df = asignar_condicion(df) 
+
+df = marcar_validez(df, hay_onsets=len(t_onset) > 0) 
+
+  
+
+validar_segmentacion(sujeto, df, te, x, xf, flujo, t_onset, lag_s, carpeta) 
+
+analizar_basal(sujeto, df, carpeta) 
+
+comparar_ciclos(sujeto, df, te, xf, carpeta) 
+
+  
+
+resumen = resumen_sujeto(sujeto, te, x, df) 
+
+seccion("RESUMEN DEL SUJETO") 
+
+print(resumen.T.to_string(header=False)) 
+
+df.to_csv(carpeta / f"ciclos_sujeto{sujeto}.csv", index=False, encoding="utf-8-sig") 
+
+resumen.to_csv(carpeta / f"caracteristicas_sujeto{sujeto}.csv", index=False, encoding="utf-8-sig") 
+
+return df, resumen 
+
+  
+
+  
+
+def main(): 
+
+args = [a for a in sys.argv[1:] if Path(a).exists() and (a.lower().endswith(".csv") or Path(a).is_dir())] 
+
+origen = Path(args[0]) if args else RUTA_DATOS 
+
+archivos = [origen] if origen.is_file() else sorted(origen.glob(PATRON)) 
+
+if not archivos: 
+
+raise FileNotFoundError(f"No se encontraron archivos {PATRON} en {origen}") 
+
+base = origen.parent if origen.is_file() else origen 
+
+salida = base / CARPETA_SALIDA 
+
+salida.mkdir(exist_ok=True) 
+
+  
+
+params = {k: (str(v) if isinstance(v, Path) else v) for k, v in globals().items() 
+
+if k.isupper() and k not in ("COL",) and isinstance(v, (int, float, str, bool, list, tuple, Path))} 
+
+params["COL"] = COL 
+
+(salida / "parametros_usados.json").write_text(json.dumps(params, indent=2, ensure_ascii=False, default=str), 
+
+encoding="utf-8") 
+
+todos, resumenes = [], [] 
+
+for ruta in archivos: 
+
+df, resumen = procesar_sujeto(ruta, salida) 
+
+todos.append(df) 
+
+resumenes.append(resumen) 
+
+pd.concat(todos).to_csv(salida / "matriz_ciclos_todos.csv", index=False, encoding="utf-8-sig") 
+
+pd.concat(resumenes).to_csv(salida / "caracteristicas_todos.csv", index=False, encoding="utf-8-sig") 
+
+print(f"\nListo. Resultados en: {salida}") 
+
+  
+
+  
+
+if __name__ == "__main__": 
+
+main() 

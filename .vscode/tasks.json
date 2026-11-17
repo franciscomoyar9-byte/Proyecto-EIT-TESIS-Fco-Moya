@@ -1,0 +1,21 @@
+{
+    // Terminal > Run Task... para ejecutar cada paso desde VS Code
+    "version": "2.0.0",
+    "options": {
+        "cwd": "${workspaceFolder}",
+        "env": { "MPLBACKEND": "Agg", "PYTHONIOENCODING": "utf-8" }
+    },
+    "tasks": [
+        { "label": "0. Instalar dependencias", "type": "shell", "command": "python -m pip install -r requirements.txt" },
+        { "label": "1. Pipeline EIT", "type": "shell", "command": "python src/pipeline_eit.py" },
+        { "label": "2. Modelo y métricas", "type": "shell", "command": "python src/modelo_eit.py" },
+        { "label": "3. Generar borrador PDF", "type": "shell", "command": "python src/generar_borrador.py" },
+        {
+            "label": "4. Ejecutar todo",
+            "dependsOrder": "sequence",
+            "dependsOn": ["1. Pipeline EIT", "2. Modelo y métricas", "3. Generar borrador PDF"],
+            "group": { "kind": "build", "isDefault": true },
+            "problemMatcher": []
+        }
+    ]
+}
